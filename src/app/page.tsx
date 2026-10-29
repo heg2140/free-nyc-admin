@@ -1,52 +1,49 @@
 import Link from "next/link";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { requireSuperadmin } from "@/lib/auth";
-import { fetchAll } from "@/lib/data";
-import { ACTIVITY_TYPES, TIMES_OF_DAY } from "@/lib/constants";
-import {
-  BarList,
-  Card,
-  ColumnChart,
-  EmptyState,
-  Heatmap,
-  StatTile,
-  VoteSplit,
-} from "@/components/charts";
+import { BarList, Card, ColumnChart, EmptyState, Heatmap, StatTile } from "@/components/charts";
 
 export const dynamic = "force-dynamic";
 
-type Generation = {
-  id: number;
-  user_id: string;
-  activity_type: string;
-  time_of_day: string;
-  max_travel_minutes: number;
-  created_at: string;
-};
-
-type Suggestion = {
-  id: number;
-  title: string;
-  neighborhood: string | null;
-  activity_type: string | null;
-  created_at: string;
-};
-
-type Vote = { suggestion_id: number; user_id: string; value: number };
-
 const DAYS_SHOWN = 30;
+const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"] as const;
+const TIME_BLOCKS = ["12–6am", "6am–12pm", "12–6pm", "6pm–12am"] as const;
 
-const TRAVEL_BUCKETS = [
-  { label: "15 min or less", max: 15 },
-  { label: "16–30 min", max: 30 },
-  { label: "31–45 min", max: 45 },
-  { label: "46–60 min", max: 60 },
-  { label: "61–90 min", max: 90 },
-  { label: "Over 90 min", max: Infinity },
-];
+function headCount(supabase: SupabaseClient, table: string) {
+  return supabase.from(table).select("id", { count: "exact", head: true });
+}
 
-function nyDateKey(date: Date) {
-  // en-CA formats as YYYY-MM-DD.
-  return date.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+async function count(
+  supabase: SupabaseClient,
+  table: string,
+  filter?: (q: ReturnType<typeof headCount>) => ReturnType<typeof headCount>
+) {
+  let query = headCount(supabase, table);
+  if (filter) query = filter(query);
+  const { count: n } = await query;
+  return n ?? 0;
+}
+
+function nyParts(iso: string) {
+  const d = new Date(iso);
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      weekday: "short",
+      hour: "numeric",
+      hourCycle: "h23",
+    })
+      .formatToParts(d)
+      .map((p) => [p.type, p.value])
+  );
+  return {
+    day: `${parts.year}-${parts.month}-${parts.day}`,
+    weekday: parts.weekday as (typeof WEEKDAYS)[number],
+    hour: Number(parts.hour),
+  };
 }
 
 function percent(part: number, whole: number) {
@@ -56,318 +53,155 @@ function percent(part: number, whole: number) {
 export default async function StatsPage() {
   const { supabase } = await requireSuperadmin();
 
-  const [{ count: userCount }, generations, suggestions, votes] =
-    await Promise.all([
-      supabase.from("profiles").select("id", { count: "exact", head: true }),
-      fetchAll<Generation>(
-        supabase,
-        "generations",
-        "id, user_id, activity_type, time_of_day, max_travel_minutes, created_at"
-      ),
-      fetchAll<Suggestion>(
-        supabase,
-        "suggestions",
-        "id, title, neighborhood, activity_type, created_at"
-      ),
-      fetchAll<Vote>(supabase, "votes", "suggestion_id, user_id, value"),
-    ]);
+  // The data is a snapshot, so anchor the "recent" window on the newest caption.
+  const { data: newest } = await supabase
+    .from("captions")
+    .select("created_datetime_utc")
+    .order("created_datetime_utc", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  const windowEnd = newest ? new Date(newest.created_datetime_utc) : new Date();
+  const windowStart = new Date(windowEnd);
+  windowStart.setDate(windowEnd.getDate() - (DAYS_SHOWN - 1));
+  windowStart.setHours(0, 0, 0, 0);
 
-  // --- Headline numbers ---
-  const upvotes = votes.filter((v) => v.value > 0).length;
-  const downvotes = votes.length - upvotes;
-  const searchers = new Set(generations.map((g) => g.user_id)).size;
-  const voters = new Set(votes.map((v) => v.user_id)).size;
-  const votedSuggestionIds = new Set(votes.map((v) => v.suggestion_id));
+  const [
+    users,
+    captions,
+    requests,
+    responses,
+    upvotes,
+    downvotes,
+    { data: models },
+    { data: flavors },
+  ] = await Promise.all([
+    count(supabase, "profiles"),
+    count(supabase, "captions"),
+    count(supabase, "caption_requests"),
+    count(supabase, "llm_model_responses"),
+    count(supabase, "caption_votes", (q) => q.gt("vote_value", 0)),
+    count(supabase, "caption_votes", (q) => q.lt("vote_value", 0)),
+    supabase.from("llm_models").select("id, name"),
+    supabase.from("humor_flavors").select("id, slug"),
+  ]);
 
-  // --- Searches per day (last 30 days, New York time) ---
-  const perDay = new Map<string, number>();
-  for (const g of generations) {
-    const key = nyDateKey(new Date(g.created_at));
-    perDay.set(key, (perDay.get(key) ?? 0) + 1);
+  // Captions in the window (paged: Supabase returns at most 1000 rows per call).
+  const recent: Array<{ created_datetime_utc: string; humor_flavor_id: number | null }> = [];
+  for (let from = 0; from < 50_000; from += 1000) {
+    const { data } = await supabase
+      .from("captions")
+      .select("created_datetime_utc, humor_flavor_id")
+      .gte("created_datetime_utc", windowStart.toISOString())
+      .order("created_datetime_utc", { ascending: true })
+      .range(from, from + 999);
+    recent.push(...(data ?? []));
+    if (!data || data.length < 1000) break;
   }
-  const today = new Date();
+
+  // LLM workload per model (one fast count per model).
+  const modelCounts = await Promise.all(
+    (models ?? []).map(async (m) => ({
+      label: m.name as string,
+      value: await count(supabase, "llm_model_responses", (q) => q.eq("llm_model_id", m.id)),
+    }))
+  );
+  const busiestModels = modelCounts.filter((m) => m.value > 0).sort((a, b) => b.value - a.value).slice(0, 8);
+
+  // Captions per day.
+  const perDay = new Map<string, number>();
+  const heat = new Map<string, number>();
+  const perFlavor = new Map<number, number>();
+  for (const c of recent) {
+    const { day, weekday, hour } = nyParts(c.created_datetime_utc);
+    perDay.set(day, (perDay.get(day) ?? 0) + 1);
+    const block = TIME_BLOCKS[Math.floor(hour / 6)];
+    heat.set(`${weekday}|${block}`, (heat.get(`${weekday}|${block}`) ?? 0) + 1);
+    if (c.humor_flavor_id !== null) {
+      perFlavor.set(c.humor_flavor_id, (perFlavor.get(c.humor_flavor_id) ?? 0) + 1);
+    }
+  }
   const dayColumns = Array.from({ length: DAYS_SHOWN }, (_, i) => {
-    const date = new Date(today);
-    date.setDate(today.getDate() - (DAYS_SHOWN - 1 - i));
-    const key = nyDateKey(date);
+    const date = new Date(windowStart);
+    date.setDate(windowStart.getDate() + i);
+    const { day } = nyParts(date.toISOString());
     return {
-      key,
-      label: date.toLocaleDateString("en-US", {
-        month: "short",
-        day: "numeric",
-        timeZone: "America/New_York",
-      }),
-      value: perDay.get(key) ?? 0,
+      key: day,
+      label: date.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "America/New_York" }),
+      value: perDay.get(day) ?? 0,
     };
   });
-  const searchesInWindow = dayColumns.reduce((sum, c) => sum + c.value, 0);
 
-  // --- What people search for, by time of day ---
-  const heat = new Map<string, number>();
-  for (const g of generations) {
-    const key = `${g.activity_type}|${g.time_of_day}`;
-    heat.set(key, (heat.get(key) ?? 0) + 1);
-  }
-  const heatRows = [
-    ...ACTIVITY_TYPES,
-    ...[...new Set(generations.map((g) => g.activity_type))].filter(
-      (t) => !(ACTIVITY_TYPES as readonly string[]).includes(t)
-    ),
-  ];
-
-  // --- Neighborhoods the AI sends people to ---
-  const byNeighborhood = new Map<string, number>();
-  for (const s of suggestions) {
-    const n = s.neighborhood?.trim() || "Unknown";
-    byNeighborhood.set(n, (byNeighborhood.get(n) ?? 0) + 1);
-  }
-  const topNeighborhoods = [...byNeighborhood.entries()]
+  const flavorName = new Map((flavors ?? []).map((f) => [f.id as number, f.slug as string]));
+  const topFlavors = [...perFlavor.entries()]
     .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
-    .map(([label, value]) => ({
-      label,
+    .slice(0, 8)
+    .map(([id, value]) => ({
+      label: flavorName.get(id) ?? `#${id}`,
       value,
-      tooltip: `${label}: ${value} suggestions (${percent(value, suggestions.length)} of all)`,
+      tooltip: `${flavorName.get(id) ?? `#${id}`}: ${value} captions (${percent(value, recent.length)} of recent)`,
     }));
 
-  // --- How far people are willing to travel ---
-  const travelCounts = TRAVEL_BUCKETS.map(() => 0);
-  for (const g of generations) {
-    const index = TRAVEL_BUCKETS.findIndex((b) => g.max_travel_minutes <= b.max);
-    travelCounts[index]++;
-  }
-  const sortedTravel = generations
-    .map((g) => g.max_travel_minutes)
-    .sort((a, b) => a - b);
-  const medianTravel = sortedTravel.length
-    ? sortedTravel[Math.floor(sortedTravel.length / 2)]
-    : null;
-
-  // --- Votes per suggestion ---
-  const tally = new Map<number, { up: number; down: number }>();
-  for (const v of votes) {
-    const t = tally.get(v.suggestion_id) ?? { up: 0, down: 0 };
-    if (v.value > 0) t.up++;
-    else t.down++;
-    tally.set(v.suggestion_id, t);
-  }
-  const suggestionById = new Map(suggestions.map((s) => [s.id, s]));
-  const rated = [...tally.entries()]
-    .map(([id, t]) => ({ suggestion: suggestionById.get(id), ...t }))
-    .filter((r) => r.suggestion);
-
-  const favorites = [...rated]
-    .sort((a, b) => b.up - b.down - (a.up - a.down) || b.up - a.up)
-    .slice(0, 5);
-
-  // Divisive = lots of votes on both sides.
-  const divisive = rated
-    .filter((r) => r.up > 0 && r.down > 0)
-    .sort((a, b) => Math.min(b.up, b.down) - Math.min(a.up, a.down) || b.up + b.down - (a.up + a.down))
-    .slice(0, 5);
-
-  // --- Which activity types win votes ---
-  const approvalByType = new Map<string, { up: number; down: number }>();
-  for (const r of rated) {
-    const type = r.suggestion!.activity_type ?? "Other";
-    const t = approvalByType.get(type) ?? { up: 0, down: 0 };
-    t.up += r.up;
-    t.down += r.down;
-    approvalByType.set(type, t);
-  }
-  const approvalRows = [...approvalByType.entries()]
-    .map(([label, t]) => ({
-      label,
-      value: Math.round((t.up / (t.up + t.down)) * 100),
-      tooltip: `${label}: ${t.up} up, ${t.down} down`,
-    }))
-    .sort((a, b) => b.value - a.value);
-
-  // --- Places the AI keeps recommending ---
-  const titleCounts = new Map<string, { label: string; value: number }>();
-  for (const s of suggestions) {
-    const key = s.title.trim().toLowerCase();
-    const entry = titleCounts.get(key) ?? { label: s.title.trim(), value: 0 };
-    entry.value++;
-    titleCounts.set(key, entry);
-  }
-  const repeats = [...titleCounts.values()]
-    .filter((t) => t.value > 1)
-    .sort((a, b) => b.value - a.value)
-    .slice(0, 8);
+  const votes = upvotes + downvotes;
 
   return (
-    <main className="mx-auto w-full max-w-6xl px-6 py-10">
-      <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-        Stats
-      </h1>
+    <main className="w-full px-6 py-8">
+      <h1 className="text-3xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">Stats</h1>
       <p className="mt-1 text-zinc-600 dark:text-zinc-400">
-        How students are using Free NYC, and what the AI keeps telling them.
+        What the caption pipeline is producing, and how people react to it.
       </p>
 
-      <div className="mt-8 grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <StatTile
-          label="Users"
-          value={(userCount ?? 0).toLocaleString()}
-          detail={`${percent(searchers, userCount ?? 0)} have run a search`}
-        />
-        <StatTile
-          label="Searches"
-          value={generations.length.toLocaleString()}
-          detail={`${searchesInWindow.toLocaleString()} in the last ${DAYS_SHOWN} days`}
-        />
-        <StatTile
-          label="AI suggestions"
-          value={suggestions.length.toLocaleString()}
-          detail={`${percent(votedSuggestionIds.size, suggestions.length)} have at least one vote`}
-        />
-        <StatTile
-          label="Votes"
-          value={votes.length.toLocaleString()}
-          detail={`${percent(upvotes, votes.length)} upvotes · ${voters} voters`}
-        />
+      <div className="mt-8 grid grid-cols-2 gap-4 lg:grid-cols-5">
+        <StatTile label="Users" value={users.toLocaleString()} />
+        <StatTile label="AI captions" value={captions.toLocaleString()} detail={`${(captions / Math.max(1, requests)).toFixed(1)} per generation request`} />
+        <StatTile label="Generation requests" value={requests.toLocaleString()} />
+        <StatTile label="LLM responses" value={responses.toLocaleString()} detail={`${(responses / Math.max(1, requests)).toFixed(1)} model calls per request`} />
+        <StatTile label="Votes" value={votes.toLocaleString()} detail={`${percent(upvotes, votes)} upvotes`} />
       </div>
 
-      <div className="mt-4 grid grid-cols-1 gap-4 lg:grid-cols-2">
+      <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
         <Card
-          title={`Searches per day`}
-          subtitle={`Last ${DAYS_SHOWN} days, New York time`}
-          className="lg:col-span-2"
+          title="Captions generated per day"
+          subtitle={`${DAYS_SHOWN} days ending ${windowEnd.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "America/New_York" })} (the newest caption)`}
+          className="xl:col-span-2"
         >
-          {generations.length ? (
-            <ColumnChart columns={dayColumns} />
+          {recent.length ? <ColumnChart columns={dayColumns} /> : <EmptyState>No captions in this window.</EmptyState>}
+        </Card>
+
+        <Card title="When captions get made" subtitle="Recent captions by weekday and time of day (New York time)">
+          {recent.length ? (
+            <Heatmap rows={WEEKDAYS} columns={TIME_BLOCKS} values={(r, c) => heat.get(`${r}|${c}`) ?? 0} unit="captions" />
           ) : (
-            <EmptyState>No searches yet.</EmptyState>
+            <EmptyState>No captions in this window.</EmptyState>
           )}
         </Card>
 
-        <Card
-          title="What people look for, and when"
-          subtitle="Searches by activity type and time of day"
-          className="lg:col-span-2"
-        >
-          {generations.length ? (
-            <Heatmap
-              rows={heatRows}
-              columns={TIMES_OF_DAY}
-              values={(r, c) => heat.get(`${r}|${c}`) ?? 0}
-            />
-          ) : (
-            <EmptyState>No searches yet.</EmptyState>
-          )}
+        <Card title="Busiest prompt chains" subtitle="Share of recent captions by humor flavor">
+          {topFlavors.length ? <BarList rows={topFlavors} /> : <EmptyState>No captions in this window.</EmptyState>}
         </Card>
 
-        <Card
-          title="Where the AI sends people"
-          subtitle="Top 10 neighborhoods by number of suggestions"
-        >
-          {topNeighborhoods.length ? (
-            <BarList rows={topNeighborhoods} />
-          ) : (
-            <EmptyState>No suggestions yet.</EmptyState>
-          )}
+        <Card title="LLM workload by model" subtitle="All-time responses per model">
+          {busiestModels.length ? <BarList rows={busiestModels} /> : <EmptyState>No LLM responses yet.</EmptyState>}
         </Card>
 
-        <Card
-          title="How far will students go?"
-          subtitle={
-            medianTravel === null
-              ? "Maximum one-way travel time per search"
-              : `Maximum one-way travel time per search · median ${medianTravel} min`
-          }
-        >
-          {generations.length ? (
+        <Card title="How people vote" subtitle="All caption votes">
+          {votes ? (
             <BarList
-              rows={TRAVEL_BUCKETS.map((b, i) => ({
-                label: b.label,
-                value: travelCounts[i],
-                tooltip: `${b.label}: ${travelCounts[i]} searches (${percent(travelCounts[i], generations.length)})`,
-              }))}
+              rows={[
+                { label: "▲ Upvotes", value: upvotes, tooltip: `${upvotes.toLocaleString()} upvotes (${percent(upvotes, votes)})` },
+                { label: "▼ Downvotes", value: downvotes, tooltip: `${downvotes.toLocaleString()} downvotes (${percent(downvotes, votes)})` },
+              ]}
             />
-          ) : (
-            <EmptyState>No searches yet.</EmptyState>
-          )}
-        </Card>
-
-        <Card title="Community favorites" subtitle="Highest net score (upvotes minus downvotes)">
-          <RankedSuggestions rows={favorites} empty="No votes yet." />
-        </Card>
-
-        <Card title="Most divisive" subtitle="Suggestions with the most votes on both sides">
-          <RankedSuggestions
-            rows={divisive}
-            empty="Nothing divisive yet. Every voted suggestion is all up or all down."
-          />
-        </Card>
-
-        <Card
-          title="Which activity types win votes"
-          subtitle="Share of votes that are upvotes, by activity type"
-        >
-          {approvalRows.length ? (
-            <BarList rows={approvalRows} max={100} format={(v) => `${v}%`} />
           ) : (
             <EmptyState>No votes yet.</EmptyState>
-          )}
-        </Card>
-
-        <Card
-          title="The AI's go-to spots"
-          subtitle="Places suggested more than once across all searches"
-        >
-          {repeats.length ? (
-            <BarList
-              rows={repeats.map((r) => ({
-                ...r,
-                tooltip: `${r.label}: suggested ${r.value} times`,
-              }))}
-            />
-          ) : (
-            <EmptyState>The AI hasn&apos;t repeated itself yet.</EmptyState>
           )}
         </Card>
       </div>
 
       <p className="mt-6 text-xs text-zinc-500 dark:text-zinc-400">
-        Downvotes total {downvotes.toLocaleString()}. See every vote on the{" "}
-        <Link href="/votes" className="underline">
-          Votes
-        </Link>{" "}
-        page.
+        Browse the underlying rows from the sidebar, for example{" "}
+        <Link href="/captions" className="underline">AI generated captions</Link> or{" "}
+        <Link href="/llm-responses" className="underline">LLM responses</Link>.
       </p>
     </main>
-  );
-}
-
-function RankedSuggestions({
-  rows,
-  empty,
-}: {
-  rows: Array<{ suggestion?: Suggestion; up: number; down: number }>;
-  empty: string;
-}) {
-  if (rows.length === 0) return <EmptyState>{empty}</EmptyState>;
-  return (
-    <ol className="flex flex-col divide-y divide-black/[.06] dark:divide-white/[.08]">
-      {rows.map(({ suggestion, up, down }, i) => (
-        <li key={suggestion!.id} className="flex items-center gap-3 py-2.5">
-          <span className="w-4 shrink-0 text-sm font-semibold text-zinc-400 tabular-nums">
-            {i + 1}
-          </span>
-          <span className="min-w-0 flex-1">
-            <Link
-              href={`/suggestions/${suggestion!.id}`}
-              className="block truncate text-sm font-medium text-zinc-900 hover:underline dark:text-zinc-50"
-            >
-              {suggestion!.title}
-            </Link>
-            <span className="block truncate text-xs text-zinc-500 dark:text-zinc-400">
-              {suggestion!.neighborhood ?? "Unknown"} · {suggestion!.activity_type ?? "Other"}
-            </span>
-          </span>
-          <VoteSplit up={up} down={down} />
-        </li>
-      ))}
-    </ol>
   );
 }

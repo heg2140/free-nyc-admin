@@ -1,6 +1,5 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
-import { NavLinks } from "@/components/nav-links";
 
 export async function AdminHeader() {
   const supabase = await createClient();
@@ -8,28 +7,17 @@ export async function AdminHeader() {
     data: { user },
   } = await supabase.auth.getUser();
 
-  const { data: profile } = user
-    ? await supabase
-        .from("profiles")
-        .select("is_superadmin")
-        .eq("id", user.id)
-        .maybeSingle()
-    : { data: null };
-  const isAdmin = profile?.is_superadmin === true;
-
   return (
     <header className="border-b border-black/[.08] bg-white dark:border-white/[.1] dark:bg-zinc-950">
-      <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center gap-x-6 gap-y-2 px-6 py-3">
+      <div className="flex w-full flex-wrap items-center gap-x-6 gap-y-2 px-6 py-3">
         <Link href="/" className="flex items-baseline gap-2">
           <span className="text-lg font-semibold tracking-tight text-zinc-900 dark:text-zinc-50">
-            Free NYC
+            Humor Project
           </span>
           <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-white dark:bg-zinc-100 dark:text-zinc-900">
             Admin
           </span>
         </Link>
-
-        {isAdmin && <NavLinks />}
 
         {user && (
           <div className="ml-auto flex items-center gap-3">

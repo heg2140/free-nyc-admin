@@ -155,10 +155,12 @@ export function Heatmap({
   rows,
   columns,
   values,
+  unit = "searches",
 }: {
   rows: readonly string[];
   columns: readonly string[];
   values: (row: string, column: string) => number;
+  unit?: string;
 }) {
   const all = rows.flatMap((r) => columns.map((c) => values(r, c)));
   const top = Math.max(1, ...all);
@@ -206,7 +208,7 @@ export function Heatmap({
                       {v > 0 ? v : ""}
                     </span>
                     <Tooltip>
-                      {r} · {c}: {v} {v === 1 ? "search" : "searches"}
+                      {r} · {c}: {v.toLocaleString()} {unit}
                     </Tooltip>
                   </td>
                 );

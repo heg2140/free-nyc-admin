@@ -1,22 +1,41 @@
-# Free NYC Admin
+# Humor Project Admin
 
-Admin area for the [Free NYC](https://github.com/heg2140/nextjs-hello-world) app. It uses the same Supabase project.
+Admin area for the Humor Project (Crackd) database, built on the course's teaching-data copy.
 
-- **Stats**: usage charts (searches per day, activity × time-of-day heatmap, neighborhoods, travel times, favorites, divisive picks, the AI's repeat suggestions)
-- **Users**: read profiles, emails, sign-in dates and activity
-- **AI suggestions**: create, read, update and delete
-- **Votes**: read every upvote and downvote
+| Section | Table | Access |
+|---|---|---|
+| Users | `profiles` | Read |
+| Allowed signup domains | `allowed_signup_domains` | Create / read / update / delete |
+| Whitelisted emails | `whitelist_email_addresses` | Create / read / update / delete |
+| Prompt chains | `humor_flavors` | Read |
+| Prompt chain steps | `humor_flavor_steps` | Read |
+| Prompt chain mix | `humor_flavor_mix` | Read / update |
+| Prompt chain runs | `llm_prompt_chains` | Read |
+| AI generated captions | `captions` | Read |
+| Images | `images` | Read |
+| Generation requests | `caption_requests` | Read |
+| LLM responses | `llm_model_responses` | Read |
+| AI generation examples | `caption_examples` | Create / read / update / delete |
+| LLM providers | `llm_providers` | Create / read / update / delete |
+| LLM models | `llm_models` | Create / read / update / delete |
+| Terms | `terms` | Create / read / update / delete |
 
-Every route needs a Google login **and** `profiles.is_superadmin = true`. The proxy (`src/proxy.ts`) enforces this on every request. Each page and server action checks it again (`src/lib/auth.ts`), and Supabase row-level security policies enforce it in the database.
+Every section is described in `src/lib/resources.ts`. The generic pages in `src/app/[resource]` render the list, detail, create and edit views from that config, and the server actions only write the fields it allows.
+
+## Access
+
+Every route needs a Google login **and** `profiles.is_superadmin = true`. The proxy (`src/proxy.ts`) enforces this on every request, and each page and server action checks it again (`src/lib/auth.ts`).
+
+To avoid locking yourself out, sign in once (this creates your profile), then set the flag from the Supabase SQL Editor, which runs as the database owner:
+
+```sql
+update public.profiles set is_superadmin = true
+where id = (select id from auth.users where email = 'you@example.com');
+```
 
 ## Setup
 
-1. Run `supabase/admin-setup.sql` in the Supabase SQL Editor.
-2. Make yourself the first superadmin. The SQL Editor runs as the database owner, so it can set the flag even though the app can't:
-   ```sql
-   update public.profiles set is_superadmin = true
-   where id = (select id from auth.users where email = 'you@example.com');
-   ```
-3. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` in `.env.local` (and in Vercel).
-4. Add `https://<your-admin-domain>/auth/callback` to Supabase → Authentication → URL Configuration → Redirect URLs.
-5. `npm run dev`
+1. Restore the teaching data into a new Supabase project (see the data ZIP's `RESTORE.md`).
+2. Enable Google sign-in in that project and add `https://<your-domain>/auth/callback` to its Redirect URLs.
+3. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` in `.env.local` (and in Vercel) to that project's values.
+4. `npm run dev`
