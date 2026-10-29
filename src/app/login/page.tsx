@@ -32,7 +32,7 @@ export default async function LoginPage({
       </p>
       {error && (
         <p className="rounded-lg bg-red-50 px-4 py-2 text-sm text-red-700 dark:bg-red-950 dark:text-red-300">
-          Sign-in failed. Please try again.
+          Sign-in failed{typeof error === "string" && error !== "1" ? `: ${error}` : "."} Please try again.
         </p>
       )}
       <GoogleSignInButton

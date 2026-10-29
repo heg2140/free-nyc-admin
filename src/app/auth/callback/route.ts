@@ -7,6 +7,9 @@ import { NextResponse } from "next/server";
 export async function GET(request: Request) {
   const { searchParams, origin } = new URL(request.url);
   const code = searchParams.get("code");
+  // Supabase reports OAuth problems (e.g. a misconfigured provider) here.
+  let reason =
+    searchParams.get("error_description") ?? searchParams.get("error") ?? "No sign-in code was returned.";
 
   if (code) {
     const supabase = await createClient();
@@ -16,7 +19,8 @@ export async function GET(request: Request) {
       // The proxy sends non-superadmins on to /not-authorized from here.
       return NextResponse.redirect(`${origin}/`);
     }
+    reason = error.message;
   }
 
-  return NextResponse.redirect(`${origin}/login?error=1`);
+  return NextResponse.redirect(`${origin}/login?error=${encodeURIComponent(reason)}`);
 }
