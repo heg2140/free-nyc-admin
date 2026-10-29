@@ -37,5 +37,5 @@ where id = (select id from auth.users where email = 'you@example.com');
 
 1. Restore the teaching data into a new Supabase project (see the data ZIP's `RESTORE.md`).
 2. Enable Google sign-in in that project and add `https://<your-domain>/auth/callback` to its Redirect URLs.
-3. Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` in `.env.local` (and in Vercel) to that project's values.
+3. Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` in `.env.local` (and in Vercel) to that project's values.
 4. `npm run dev`

@@ -1,6 +1,7 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { GoogleSignInButton } from "@/components/google-sign-in-button";
+import { supabaseConfig } from "@/lib/supabase/config";
 
 export default async function LoginPage({
   searchParams,
@@ -34,7 +35,10 @@ export default async function LoginPage({
           Sign-in failed. Please try again.
         </p>
       )}
-      <GoogleSignInButton />
+      <GoogleSignInButton
+        supabaseUrl={supabaseConfig().url}
+        supabaseAnonKey={supabaseConfig().anonKey}
+      />
     </div>
   );
 }

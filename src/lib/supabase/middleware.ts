@@ -1,4 +1,5 @@
 import { createServerClient } from "@supabase/ssr";
+import { supabaseConfig } from "@/lib/supabase/config";
 import { NextResponse, type NextRequest } from "next/server";
 
 // Pages anyone can open: the login screen and the OAuth return route.
@@ -23,8 +24,8 @@ export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({ request });
 
   const supabase = createServerClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+    supabaseConfig().url,
+    supabaseConfig().anonKey,
     {
       cookies: {
         getAll() {
